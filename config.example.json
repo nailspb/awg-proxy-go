@@ -1,0 +1,33 @@
+{
+  "mode": "server",
+  "web_listen": ":8088",
+  "log_level": "info",
+  "server": {
+    "listen": ":51820",
+    "remote_addr": "172.17.0.1",
+    "remote_port": 13231,
+    "public_endpoint": "vpn.example.com:51820",
+    "client_dns": "1.1.1.1",
+    "session_ttl_sec": 180,
+    "poll_interval_sec": 30,
+    "obfuscation": {
+      "jc": 4,
+      "jmin": 40,
+      "jmax": 70,
+      "s1": 0,
+      "s2": 0,
+      "h1": 1,
+      "h2": 2,
+      "h3": 3,
+      "h4": 4
+    },
+    "router": {
+      "address": "172.17.0.1",
+      "api_port": 443,
+      "api_tls": true,
+      "user": "container",
+      "password": "",
+      "wg_iface": "wg-awg"
+    }
+  }
+}

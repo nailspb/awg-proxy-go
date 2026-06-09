@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>awgproxy</title>
+  <link rel="stylesheet" href="app.css">
+</head>
+<body>
+  <div class="app">
+    <nav class="sidenav">
+      <div class="sidenav-top">
+        <div class="sidenav-brand">awgproxy</div>
+        <select id="lang" class="lang-select" title="Language">
+          <option value="en">EN</option>
+          <option value="ru">RU</option>
+        </select>
+      </div>
+      <div class="sidenav-items">
+        <button class="sidenav-item active" data-view="status"><span class="sidenav-icon">◎</span><span data-i18n="nav.status">Status</span></button>
+        <button class="sidenav-item" data-view="router"><span class="sidenav-icon">⇄</span><span data-i18n="nav.router">Router</span></button>
+        <button class="sidenav-item" data-view="peers"><span class="sidenav-icon">≡</span><span data-i18n="nav.peers">Peers</span></button>
+        <button class="sidenav-item" data-view="settings"><span class="sidenav-icon">⚙</span><span data-i18n="nav.settings">Settings</span></button>
+      </div>
+      <div class="sidenav-footer">
+        <div class="sidenav-footer-text">
+          <div>AmneziaWG proxy</div>
+          <div class="muted" id="build-info">—</div>
+        </div>
+        <button id="logout-btn" class="btn btn-logout hidden" type="button" data-i18n="login.logout">Sign out</button>
+      </div>
+    </nav>
+
+    <main class="content">
+      <!-- STATUS -->
+      <section class="view" data-view="status">
+        <div class="view-scroll">
+          <div class="page">
+            <h1 class="page-title" data-i18n="title.status">Status</h1>
+            <div class="status-grid">
+              <div class="stat"><div class="stat-label" data-i18n="status.poll">Router poll</div><div class="stat-value" id="st-poll">—</div></div>
+              <div class="stat"><div class="stat-label" data-i18n="status.key">Server key</div><div class="stat-value" id="st-key">—</div></div>
+              <div class="stat mode-server"><div class="stat-label" data-i18n="status.clients">Clients</div><div class="stat-value" id="st-clients">—</div></div>
+              <div class="stat mode-client hidden"><div class="stat-label" data-i18n="status.upstream">Upstream peer</div><div class="stat-value" id="st-upstream">—</div></div>
+              <div class="stat mode-client hidden"><div class="stat-label" data-i18n="status.upstreamAddr">Upstream endpoint</div><div class="stat-value mono" id="st-upstream-addr">—</div></div>
+              <div class="stat mode-client hidden"><div class="stat-label" data-i18n="status.wgListen">Router WG listen-port</div><div class="stat-value mono" id="st-wglisten">—</div></div>
+            </div>
+            <p class="form-hint" data-i18n="hint.apply">Changes apply immediately, no restart needed.</p>
+          </div>
+        </div>
+      </section>
+
+      <!-- PEERS -->
+      <section class="view hidden" data-view="peers">
+        <div class="view-scroll">
+          <div class="page">
+            <!-- LIST -->
+            <div id="peers-list">
+              <div class="topbar">
+                <div class="breadcrumb"><span class="crumb current" data-i18n="title.peers">Peers</span></div>
+                <div class="topbar-right">
+                  <button id="peer-import" class="btn mode-client hidden" type="button"><span class="btn-icon">⇪</span> <span data-i18n="peers.import">Import config</span></button>
+                  <button id="peer-add" class="btn btn-primary"><span class="btn-icon">+</span> <span data-i18n="peers.add">Add peer</span></button>
+                </div>
+              </div>
+              <h1 class="page-title" data-i18n="title.peers">Peers</h1>
+              <div class="toolbar">
+                <div class="search"><span class="search-icon">⌕</span><input id="peers-search" type="text" data-i18n-ph="peers.search" placeholder="Search peers"></div>
+                <div class="filter-pills">
+                  <button class="pill active" data-filter="all"><span data-i18n="peers.filterAll">All</span><span class="pill-count" id="count-all">0</span></button>
+                  <button class="pill" data-filter="active"><span data-i18n="peers.filterActive">Active</span><span class="pill-count" id="count-active">0</span></button>
+                  <button class="pill" data-filter="disabled"><span data-i18n="peers.filterDisabled">Disabled</span><span class="pill-count" id="count-disabled">0</span></button>
+                </div>
+              </div>
+              <div id="peers-error" class="error hidden"></div>
+              <div class="table table-peers">
+                <div class="thead">
+                  <div class="th" data-i18n="peers.name">Name</div>
+                  <div class="th" data-i18n="peers.allowed">Allowed address</div>
+                  <div class="th" data-i18n="peers.handshake">Handshake</div>
+                  <div class="th" data-i18n="peers.status">Status</div>
+                  <div class="th"></div>
+                </div>
+                <div id="peers-rows" class="tbody"></div>
+                <div id="peers-empty" class="empty hidden">
+                  <div class="empty-icon">⤳</div>
+                  <div class="empty-title" data-i18n="peers.emptyTitle">No peers yet</div>
+                  <div class="empty-sub" data-i18n="peers.emptySub">Add the first peer with the button above.</div>
+                </div>
+              </div>
+            </div>
+
+            <!-- EDITOR -->
+            <div id="peers-editor" class="hidden">
+              <div class="topbar">
+                <div class="breadcrumb">
+                  <button class="crumb-link" id="peer-back" data-i18n="title.peers">Peers</button>
+                  <span class="crumb-sep">›</span>
+                  <span class="crumb current" id="peer-crumb">—</span>
+                </div>
+                <div class="topbar-right">
+                  <button id="peer-qr" class="btn hidden" type="button" title="QR"><span class="btn-icon">▦</span></button>
+                  <button id="peer-save" class="btn btn-primary" data-i18n="bar.save">Save</button>
+                  <span class="topbar-sep"></span>
+                  <button id="peer-delete" class="btn btn-danger" data-i18n="peers.delete">Delete</button>
+                </div>
+              </div>
+              <div class="group-header">
+                <input id="peer-name-input" class="page-title editable" type="text" data-pk="name" data-i18n-ph="peers.namePh" placeholder="client-1">
+                <label class="row-switch big"><input type="checkbox" data-pk="enabled"><span class="switch-track"><span class="switch-thumb"></span></span></label>
+              </div>
+              <div id="peer-editor-msg" class="error hidden"></div>
+              <div class="edit-form">
+                <div class="form-row start">
+                  <label class="form-label" data-i18n="peers.pubkey">Public key</label>
+                  <div class="form-control">
+                    <input type="text" class="mono" data-pk="public_key" placeholder="base64 32-byte key">
+                    <button id="peer-genkey" class="btn" type="button"><span class="btn-icon">⚲</span> <span data-i18n="peers.genkey">Generate</span></button>
+                    <p class="form-hint" data-i18n="peers.pubhint">Paste the client's public key, or generate a new keypair.</p>
+                  </div>
+                </div>
+                <div id="peer-privrow" class="form-row start hidden">
+                  <label class="form-label" data-i18n="peers.privkey">Private key</label>
+                  <div class="form-control">
+                    <input type="text" class="mono" id="peer-privkey" readonly>
+                    <p class="form-hint" data-i18n="peers.privhint">Give this to the client. It is shown once and not stored.</p>
+                  </div>
+                </div>
+                <div class="form-row"><label class="form-label" data-i18n="peers.allowed">Allowed address</label><div class="form-control"><input type="text" class="mono" data-pk="allowed_address" placeholder="10.0.0.2/32"></div></div>
+                <div class="form-row"><label class="form-label" data-i18n="peers.endpointAddr">Endpoint address</label><div class="form-control"><input type="text" class="mono" data-pk="endpoint_address"></div></div>
+                <div class="form-row"><label class="form-label" data-i18n="peers.endpointPort">Endpoint port</label><div class="form-control"><input type="text" class="mono" data-pk="endpoint_port"></div></div>
+                <div class="form-row"><label class="form-label" data-i18n="peers.keepalive">Persistent keepalive</label><div class="form-control"><input type="text" class="mono" data-pk="persistent_keepalive" placeholder="25"></div></div>
+                <div class="form-row"><label class="form-label" data-i18n="peers.psk">Preshared key</label><div class="form-control"><input type="text" class="mono" data-pk="preshared_key"></div></div>
+                <div class="form-row"><label class="form-label" data-i18n="peers.comment">Comment</label><div class="form-control"><input type="text" data-pk="comment"></div></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- SETTINGS -->
+      <section class="view hidden" data-view="settings">
+        <div class="view-scroll">
+          <div class="page">
+            <h1 class="page-title" data-i18n="title.settings">Settings</h1>
+            <div class="error hidden error-slot"></div>
+
+          <div class="block">
+            <h2 class="section-title" data-i18n="title.service">Service</h2>
+            <div class="edit-form">
+              <div class="form-row">
+                <label class="form-label" data-i18n="label.mode">Mode</label>
+                <div class="form-control">
+                  <select data-key="mode" id="mode-select">
+                    <option value="server" data-i18n="mode.server">server (1:N)</option>
+                    <option value="client" data-i18n="mode.client">client (1:1)</option>
+                  </select>
+                  <small class="field-hint" data-i18n="help.mode">server — proxy terminates AmneziaWG from many external clients and forwards plain WG to the router. client — the router's WG-out is diverted into the proxy, which obfuscates it for an external AmneziaWG server.</small>
+                </div>
+              </div>
+              <div class="form-row mode-server">
+                <label class="form-label" data-i18n="label.wgIface">WG interface</label>
+                <div class="form-control">
+                  <select class="mono iface-select" data-key="server.router.wg_iface"></select>
+                  <label class="toggle">
+                    <input type="checkbox" data-key="server.masquerade">
+                    <span class="toggle-track"></span>
+                    <span class="toggle-label" data-i18n="label.masquerade">Masquerade</span>
+                  </label>
+                  <small class="field-hint" data-i18n="help.wgIfaceServer">RouterOS WG interface that serves peers (the proxy reads its public key and peer list). Masquerade toggle creates a srcnat rule for this interface's network so clients can reach the internet.</small>
+                </div>
+              </div>
+              <div class="form-row mode-client hidden">
+                <label class="form-label" data-i18n="label.wgIface">WG interface</label>
+                <div class="form-control">
+                  <select class="mono iface-select" data-key="client.router.wg_iface"></select>
+                  <small class="field-hint" data-i18n="help.wgIfaceClient">RouterOS WG interface used as an outbound client — its traffic is diverted into the proxy.</small>
+                </div>
+              </div>
+              <div class="form-row mode-server">
+                <label class="form-label" data-i18n="label.sessionTtl">Session TTL (sec)</label>
+                <div class="form-control">
+                  <input type="number" min="1" data-key="server.session_ttl_sec">
+                  <small class="field-hint" data-i18n="help.sessionTtl">How long an inactive client session is kept in the routing table.</small>
+                </div>
+              </div>
+              <div class="form-row mode-server">
+                <label class="form-label" data-i18n="label.pollInterval">Poll interval (sec)</label>
+                <div class="form-control">
+                  <input type="number" min="1" data-key="server.poll_interval_sec">
+                  <small class="field-hint" data-i18n="help.pollInterval">How often the router is polled for the WG public key and peer list.</small>
+                </div>
+              </div>
+              <div class="form-row mode-client hidden">
+                <label class="form-label" data-i18n="label.sessionTtl">Session TTL (sec)</label>
+                <div class="form-control">
+                  <input type="number" min="1" data-key="client.session_ttl_sec">
+                  <small class="field-hint" data-i18n="help.sessionTtl">How long an inactive client session is kept in the routing table.</small>
+                </div>
+              </div>
+              <div class="form-row mode-client hidden">
+                <label class="form-label" data-i18n="label.pollInterval">Poll interval (sec)</label>
+                <div class="form-control">
+                  <input type="number" min="1" data-key="client.poll_interval_sec">
+                  <small class="field-hint" data-i18n="help.pollInterval">How often the router is polled for the marked upstream peer and listen-port.</small>
+                </div>
+              </div>
+              <div class="form-row">
+                <label class="form-label" data-i18n="label.logLevel">Log level</label>
+                <div class="form-control">
+                  <select data-key="log_level">
+                    <option value="debug">debug</option>
+                    <option value="info">info</option>
+                    <option value="warn">warn</option>
+                    <option value="error">error</option>
+                    <option value="none">none</option>
+                  </select>
+                  <small class="field-hint" data-i18n="help.logLevel">Service log verbosity. debug spams packet-level info, info is normal operation.</small>
+                </div>
+              </div>
+              <div class="form-row">
+                <label class="form-label" data-i18n="label.webListen">Web UI listen</label>
+                <div class="form-control">
+                  <input type="text" class="mono" data-key="web_listen" placeholder=":8088">
+                  <small class="field-hint" data-i18n="help.webListen">Address of this web panel inside the container. Change requires a container restart.</small>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- SERVER: внутри контейнера (контейнер ↔ роутер) -->
+          <div class="block mode-server">
+            <h2 class="section-title" data-i18n="title.netInternal">Container ↔ router</h2>
+            <p class="form-hint" data-i18n="hint.netInternalServer">Where the local RouterOS WireGuard server lives — the proxy forwards deobfuscated WG to it.</p>
+            <div class="edit-form">
+              <div class="form-row">
+                <label class="form-label" data-i18n="label.remoteAddr">Remote WG address</label>
+                <div class="form-control">
+                  <input type="text" class="mono" data-key="server.remote_addr" placeholder="172.17.0.1">
+                  <button type="button" class="icon-btn auto-btn" data-auto="gateway" data-i18n-title="btn.autoDetect" title="Detect automatically">⌖</button>
+                  <small class="field-hint" data-i18n="help.remoteAddr">Local IP of the RouterOS WG server reachable from this container (usually the veth gateway).</small>
+                </div>
+              </div>
+              <div class="form-row">
+                <label class="form-label" data-i18n="label.remotePort">Remote WG port</label>
+                <div class="form-control">
+                  <input type="number" min="1" max="65535" data-key="server.remote_port" placeholder="13231">
+                  <button type="button" class="icon-btn auto-btn" data-auto="iface_listen_port" data-i18n-title="btn.autoDetect" title="Detect automatically">⌖</button>
+                  <small class="field-hint" data-i18n="help.remotePort">listen-port of the local RouterOS WG interface.</small>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- SERVER: внешний WG (что видит AmneziaWG-клиент) -->
+          <div class="block mode-server">
+            <h2 class="section-title" data-i18n="title.netExternal">External WG endpoint</h2>
+            <p class="form-hint" data-i18n="hint.netExternalServer">What external AmneziaWG clients see — listening port and connection parameters baked into their .conf/QR.</p>
+            <div class="edit-form">
+              <div class="form-row">
+                <label class="form-label" data-i18n="label.listen">Listen (UDP)</label>
+                <div class="form-control">
+                  <input type="text" class="mono w-port" data-key="server.listen" placeholder=":51820">
+                  <label class="toggle">
+                    <input type="checkbox" data-key="server.divert">
+                    <span class="toggle-track"></span>
+                    <span class="toggle-label" data-i18n="label.divertShort">Auto dst-nat</span>
+                  </label>
+                  <small class="field-hint" data-i18n="help.listenServer">UDP socket where clients connect inside the container. Toggle creates/removes a dst-nat rule on the router that forwards this port into the container.</small>
+                </div>
+              </div>
+              <div class="form-row">
+                <label class="form-label" data-i18n="label.containerAddr">Container address</label>
+                <div class="form-control">
+                  <input type="text" class="mono" data-key="server.container_addr" placeholder="172.17.0.2">
+                  <button type="button" class="icon-btn auto-btn" data-auto="container_addr" data-i18n-title="btn.autoDetect" title="Detect automatically">⌖</button>
+                  <small class="field-hint" data-i18n="help.containerAddrServer">IP of this container on the router-side veth — used as the to-address of the auto-managed dst-nat rule. Required when Auto dst-nat is on.</small>
+                </div>
+              </div>
+              <div class="form-row">
+                <label class="form-label" data-i18n="label.publicEndpoint">Public endpoint</label>
+                <div class="form-control">
+                  <input type="text" class="mono" id="pe-host" placeholder="vpn.example.com">
+                  <button type="button" class="icon-btn auto-btn" id="pe-host-pick" data-i18n-title="btn.pickAddr" title="Pick router address">▾</button>
+                  <input type="number" min="1" max="65535" class="w-port" id="pe-port" placeholder="51820">
+                  <input type="hidden" data-key="server.public_endpoint">
+                  <small class="field-hint" data-i18n="help.publicEndpoint">Host (DNS or one of the router's IPs) + port for clients to reach the proxy from the internet. Goes into the generated client .conf/QR.</small>
+                </div>
+              </div>
+              <div class="form-row">
+                <label class="form-label" data-i18n="label.clientDns">Client DNS</label>
+                <div class="form-control">
+                  <input type="text" class="mono" data-key="server.client_dns" placeholder="1.1.1.1">
+                  <small class="field-hint" data-i18n="help.clientDns">DNS server written into the client config (optional).</small>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <!-- CLIENT: внутри контейнера (роутер заворачивает WG в контейнер) -->
+          <div class="block mode-client hidden">
+            <h2 class="section-title" data-i18n="title.netInternal">Container ↔ router</h2>
+            <p class="form-hint" data-i18n="hint.netInternalClient">How the router redirects its own WireGuard traffic into the container. Upstream AmneziaWG server is taken from the marked peer.</p>
+            <div class="edit-form">
+              <div class="form-row">
+                <label class="form-label" data-i18n="label.listen">Listen (UDP)</label>
+                <div class="form-control">
+                  <input type="text" class="mono" data-key="client.listen" placeholder=":51820">
+                  <small class="field-hint" data-i18n="help.listenClient">UDP socket inside the container that the router's dst-nat rule points to.</small>
+                </div>
+              </div>
+              <div class="form-row">
+                <label class="form-label" data-i18n="label.containerAddr">Container address</label>
+                <div class="form-control">
+                  <input type="text" class="mono" data-key="client.container_addr" placeholder="172.17.0.2">
+                  <button type="button" class="icon-btn auto-btn" data-auto="container_addr" data-i18n-title="btn.autoDetect" title="Detect automatically">⌖</button>
+                  <small class="field-hint" data-i18n="help.containerAddr">IP of this container on the router-side veth — used as the to-address of the dst-nat rule.</small>
+                </div>
+              </div>
+              <div class="form-row">
+                <label class="form-label" data-i18n="label.divert">Auto NAT divert on router</label>
+                <div class="form-control">
+                  <label class="toggle">
+                    <input type="checkbox" data-key="client.divert">
+                    <span class="toggle-track"></span>
+                  </label>
+                  <small class="field-hint" data-i18n="help.divert">When on, the service installs and maintains the dst-nat rule that diverts wg-out traffic into this container. Off — manage the rule manually.</small>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="block mode-server">
+            <h2 class="section-title" data-i18n="title.obfuscation">Obfuscation</h2>
+            <p class="form-hint" data-i18n="hint.obfuscation">Values must match the AmneziaWG server/clients profile.</p>
+            <div class="edit-form">
+              <div class="form-row"><label class="form-label" data-i18n="label.jc">Jc — junk packets count</label><div class="form-control"><input type="number" min="0" data-key="server.obfuscation.jc"><small class="field-hint" data-i18n="help.jc">How many random junk UDP packets to send before each handshake init.</small></div></div>
+              <div class="form-row"><label class="form-label" data-i18n="label.jmin">Jmin — junk min size</label><div class="form-control"><input type="number" min="0" data-key="server.obfuscation.jmin"><small class="field-hint" data-i18n="help.jminmax">Minimum / maximum length of each junk packet (bytes).</small></div></div>
+              <div class="form-row"><label class="form-label" data-i18n="label.jmax">Jmax — junk max size</label><div class="form-control"><input type="number" min="0" data-key="server.obfuscation.jmax"></div></div>
+              <div class="form-row"><label class="form-label" data-i18n="label.s1">S1 — init prefix</label><div class="form-control"><input type="number" min="0" data-key="server.obfuscation.s1"><small class="field-hint" data-i18n="help.s1">Extra random bytes prepended to handshake-init packets.</small></div></div>
+              <div class="form-row"><label class="form-label" data-i18n="label.s2">S2 — response prefix</label><div class="form-control"><input type="number" min="0" data-key="server.obfuscation.s2"><small class="field-hint" data-i18n="help.s2">Extra random bytes prepended to handshake-response packets.</small></div></div>
+              <div class="form-row"><label class="form-label">H1</label><div class="form-control"><input type="number" min="0" data-key="server.obfuscation.h1"><small class="field-hint" data-i18n="help.h">Magic header replacing WireGuard's fixed type byte. H1=init, H2=response, H3=cookie, H4=transport.</small></div></div>
+              <div class="form-row"><label class="form-label">H2</label><div class="form-control"><input type="number" min="0" data-key="server.obfuscation.h2"></div></div>
+              <div class="form-row"><label class="form-label">H3</label><div class="form-control"><input type="number" min="0" data-key="server.obfuscation.h3"></div></div>
+              <div class="form-row"><label class="form-label">H4</label><div class="form-control"><input type="number" min="0" data-key="server.obfuscation.h4"></div></div>
+            </div>
+          </div>
+
+          <div class="block mode-client hidden">
+            <h2 class="section-title" data-i18n="title.obfuscation">Obfuscation</h2>
+            <p class="form-hint" data-i18n="hint.obfuscation">Values must match the AmneziaWG server/clients profile.</p>
+            <div class="edit-form">
+              <div class="form-row"><label class="form-label" data-i18n="label.jc">Jc — junk packets count</label><div class="form-control"><input type="number" min="0" data-key="client.obfuscation.jc"><small class="field-hint" data-i18n="help.jc">How many random junk UDP packets to send before each handshake init.</small></div></div>
+              <div class="form-row"><label class="form-label" data-i18n="label.jmin">Jmin — junk min size</label><div class="form-control"><input type="number" min="0" data-key="client.obfuscation.jmin"><small class="field-hint" data-i18n="help.jminmax">Minimum / maximum length of each junk packet (bytes).</small></div></div>
+              <div class="form-row"><label class="form-label" data-i18n="label.jmax">Jmax — junk max size</label><div class="form-control"><input type="number" min="0" data-key="client.obfuscation.jmax"></div></div>
+              <div class="form-row"><label class="form-label" data-i18n="label.s1">S1 — init prefix</label><div class="form-control"><input type="number" min="0" data-key="client.obfuscation.s1"><small class="field-hint" data-i18n="help.s1">Extra random bytes prepended to handshake-init packets.</small></div></div>
+              <div class="form-row"><label class="form-label" data-i18n="label.s2">S2 — response prefix</label><div class="form-control"><input type="number" min="0" data-key="client.obfuscation.s2"><small class="field-hint" data-i18n="help.s2">Extra random bytes prepended to handshake-response packets.</small></div></div>
+              <div class="form-row"><label class="form-label">H1</label><div class="form-control"><input type="number" min="0" data-key="client.obfuscation.h1"><small class="field-hint" data-i18n="help.h">Magic header replacing WireGuard's fixed type byte. H1=init, H2=response, H3=cookie, H4=transport.</small></div></div>
+              <div class="form-row"><label class="form-label">H2</label><div class="form-control"><input type="number" min="0" data-key="client.obfuscation.h2"></div></div>
+              <div class="form-row"><label class="form-label">H3</label><div class="form-control"><input type="number" min="0" data-key="client.obfuscation.h3"></div></div>
+              <div class="form-row"><label class="form-label">H4</label><div class="form-control"><input type="number" min="0" data-key="client.obfuscation.h4"></div></div>
+            </div>
+          </div>
+
+          </div>
+        </div>
+        <div class="view-footer">
+          <span class="dirty-dot dirty-marker hidden"></span>
+          <div class="bar-msg msg-slot"></div>
+          <div class="spacer"></div>
+          <button class="btn btn-primary save-btn" data-i18n="bar.save" disabled>Save</button>
+        </div>
+      </section>
+
+      <!-- ROUTER ACCESS -->
+      <section class="view hidden" data-view="router">
+        <div class="view-scroll">
+          <div class="page">
+            <h1 class="page-title" data-i18n="title.router">Router access</h1>
+            <div class="error hidden error-slot"></div>
+            <p class="form-hint" data-i18n="hint.routerWhy">Web UI, peers and status need REST API access to RouterOS. Without it, nothing else works.</p>
+
+            <div class="block mode-server">
+              <h2 class="section-title" data-i18n="title.routerServer">Server mode</h2>
+              <div class="edit-form">
+                <div class="form-row">
+                  <label class="form-label" data-i18n="label.routerAddr">Router address</label>
+                  <div class="form-control">
+                    <input type="text" class="mono" data-key="server.router.address" placeholder="172.17.0.1">
+                    <button type="button" class="icon-btn auto-btn" data-auto="gateway" data-i18n-title="btn.autoDetect" title="Detect automatically">⌖</button>
+                    <small class="field-hint" data-i18n="help.routerAddr">Host/IP of the router as reachable from this container (no port).</small>
+                  </div>
+                </div>
+                <div class="form-row">
+                  <label class="form-label" data-i18n="label.apiPort">API port</label>
+                  <div class="form-control">
+                    <input type="number" min="1" max="65535" class="w-port" data-key="server.router.api_port" placeholder="443">
+                    <label class="toggle">
+                      <input type="checkbox" data-key="server.router.api_tls">
+                      <span class="toggle-track"></span>
+                      <span class="toggle-label" data-i18n="label.apiTls">HTTPS</span>
+                    </label>
+                    <small class="field-hint" data-i18n="help.apiPort">Port of /ip/service www or www-ssl. Enable HTTPS for www-ssl (TLS cert is not verified).</small>
+                  </div>
+                </div>
+                <div class="form-row">
+                  <label class="form-label" data-i18n="label.user">User</label>
+                  <div class="form-control">
+                    <input type="text" data-key="server.router.user" placeholder="admin">
+                    <small class="field-hint" data-i18n="help.user">RouterOS user with read,write,api,rest-api permissions.</small>
+                  </div>
+                </div>
+                <div class="form-row">
+                  <label class="form-label" data-i18n="label.password">Password</label>
+                  <div class="form-control">
+                    <input type="password" data-key="server.router.password">
+                    <small class="field-hint" data-i18n="help.password">RouterOS password. Stored in the config file alongside the address.</small>
+                  </div>
+                </div>
+              </div>
+              <p class="form-hint" data-i18n="hint.router">Access via REST API only. The service reads WireGuard public keys and manages peers.</p>
+            </div>
+
+            <div class="block mode-client hidden">
+              <h2 class="section-title" data-i18n="title.routerClient">Client mode</h2>
+              <div class="edit-form">
+                <div class="form-row">
+                  <label class="form-label" data-i18n="label.routerAddr">Router address</label>
+                  <div class="form-control">
+                    <input type="text" class="mono" data-key="client.router.address" placeholder="172.17.0.1">
+                    <button type="button" class="icon-btn auto-btn" data-auto="gateway" data-i18n-title="btn.autoDetect" title="Detect automatically">⌖</button>
+                    <small class="field-hint" data-i18n="help.routerAddr">Host/IP of the router as reachable from this container (no port).</small>
+                  </div>
+                </div>
+                <div class="form-row">
+                  <label class="form-label" data-i18n="label.apiPort">API port</label>
+                  <div class="form-control">
+                    <input type="number" min="1" max="65535" class="w-port" data-key="client.router.api_port" placeholder="443">
+                    <label class="toggle">
+                      <input type="checkbox" data-key="client.router.api_tls">
+                      <span class="toggle-track"></span>
+                      <span class="toggle-label" data-i18n="label.apiTls">HTTPS</span>
+                    </label>
+                    <small class="field-hint" data-i18n="help.apiPort">Port of /ip/service www or www-ssl. Enable HTTPS for www-ssl (TLS cert is not verified).</small>
+                  </div>
+                </div>
+                <div class="form-row">
+                  <label class="form-label" data-i18n="label.user">User</label>
+                  <div class="form-control">
+                    <input type="text" data-key="client.router.user" placeholder="admin">
+                    <small class="field-hint" data-i18n="help.user">RouterOS user with read,write,api,rest-api permissions.</small>
+                  </div>
+                </div>
+                <div class="form-row">
+                  <label class="form-label" data-i18n="label.password">Password</label>
+                  <div class="form-control">
+                    <input type="password" data-key="client.router.password">
+                    <small class="field-hint" data-i18n="help.password">RouterOS password. Stored in the config file alongside the address.</small>
+                  </div>
+                </div>
+              </div>
+              <p class="form-hint" data-i18n="hint.router">Access via REST API only. The service reads WireGuard public keys and manages peers.</p>
+            </div>
+          </div>
+        </div>
+        <div class="view-footer">
+          <span class="dirty-dot dirty-marker hidden"></span>
+          <div class="bar-msg msg-slot"></div>
+          <div class="spacer"></div>
+          <button class="btn btn-primary save-btn" data-i18n="bar.save" disabled>Save</button>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <!-- CLIENT CONFIG / QR -->
+  <div id="qr-modal" class="modal-overlay hidden">
+    <div class="modal qr-modal">
+      <h2 class="modal-title" data-i18n="peers.configTitle">Client config</h2>
+      <div class="qr-wrap"><img id="qr-img" alt="QR"></div>
+      <pre id="qr-config" class="qr-config"></pre>
+      <div id="qr-error" class="error hidden"></div>
+      <div class="modal-actions">
+        <button id="qr-download" class="btn btn-primary" data-i18n="peers.download">Download .conf</button>
+        <button id="qr-close" class="btn" data-i18n="btn.close">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- IMPORT (client mode) -->
+  <div id="import-modal" class="modal-overlay hidden">
+    <div class="modal import-modal">
+      <h2 class="modal-title" data-i18n="peers.importTitle">Import AmneziaWG config</h2>
+      <p class="form-hint" data-i18n="peers.importHint">Upload .conf or a QR-code image, or paste the config text.</p>
+      <div class="import-row">
+        <input id="import-file" type="file" accept=".conf,.txt,text/plain,image/*">
+        <button id="import-clear" class="btn" type="button" data-i18n="btn.clear">Clear</button>
+      </div>
+      <textarea id="import-text" class="mono import-area" rows="10" placeholder="[Interface]&#10;PrivateKey = ...&#10;..."></textarea>
+      <div id="import-error" class="error hidden"></div>
+      <div id="import-preview" class="import-preview hidden">
+        <h3 class="section-title" data-i18n="peers.importPreview">Detected</h3>
+        <dl class="import-fields"></dl>
+        <p class="form-hint" data-i18n="peers.importManual">Interface private-key and address must be set on wg-out manually if not yet.</p>
+      </div>
+      <div class="modal-actions">
+        <button id="import-apply" class="btn btn-primary" type="button" disabled data-i18n="peers.importApply">Apply</button>
+        <button id="import-close" class="btn" type="button" data-i18n="btn.close">Close</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="i18n.js"></script>
+  <script src="app.js"></script>
+  <script src="peers.js"></script>
+</body>
+</html>
