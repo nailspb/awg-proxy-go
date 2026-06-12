@@ -12,14 +12,18 @@ import (
 	"time"
 )
 
-// httpClient — HTTP-клиент для REST (без проверки TLS: роутер в доверенной сети).
-func (c Config) httpClient() *http.Client {
-	return &http.Client{
-		Timeout: 10 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
-		},
-	}
+// httpClient — единый клиент с keep-alive пулом: иначе на каждый /rest вызов
+// открывался бы свой TCP/TLS-коннект, и роутер показывал бы лавину сессий
+// пользователя на каждом тике поллера.
+var httpClient = &http.Client{
+	Timeout: 10 * time.Second,
+	Transport: &http.Transport{
+		TLSClientConfig:     &tls.Config{InsecureSkipVerify: true}, // доверенная сеть роутера
+		MaxIdleConns:        16,
+		MaxIdleConnsPerHost: 8,
+		IdleConnTimeout:     90 * time.Second,
+		ForceAttemptHTTP2:   true,
+	},
 }
 
 func (c Config) apiURL(path string) string {
@@ -56,7 +60,7 @@ func (c Config) apiReq(ctx context.Context, method, path string, body any) ([]by
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := c.httpClient().Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}

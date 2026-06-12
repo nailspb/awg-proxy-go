@@ -62,7 +62,12 @@ func main() {
 
 // supervise держит прокси-стек живым и пересоздаёт его при перезагрузке конфига.
 // Сбой подключения к роутеру или невалидный конфиг не валят сервис — веб остаётся доступен.
+//
+// prevRcfg хранится между итерациями: если в новой конфигурации поменялся WG-интерфейс,
+// надо снести правила со старым iface-суффиксом (новый реконсилер их по комменту уже
+// не увидит). Делаем это ДО запуска нового стека, чтобы не плодить дубли.
 func supervise(ctx context.Context, cfgPath string, curPoller *atomic.Pointer[router.Poller], reload <-chan struct{}, log *slog.Logger) {
+	var prevRcfg *router.Config
 	for {
 		cfg, err := config.Load(cfgPath)
 		if err != nil {
@@ -79,8 +84,14 @@ func supervise(ctx context.Context, cfgPath string, curPoller *atomic.Pointer[ro
 			log.Warn("config has issues, starting partial stack", "err", vErr)
 		}
 
+		newRcfg := buildRouterConfig(cfg)
+		// Перед стартом нового стека — почистить хвосты от прошлой конфигурации,
+		// если поменялся iface (или вообще пропал доступ к роутеру).
+		cleanupStaleRules(ctx, prevRcfg, newRcfg, log)
+		prevRcfg = &newRcfg
+
 		cctx, ccancel := context.WithCancel(ctx)
-		done := startStack(cctx, cfg, log, curPoller)
+		done := startStack(cctx, cfg, newRcfg, log, curPoller)
 
 		select {
 		case <-ctx.Done():
@@ -101,11 +112,10 @@ func supervise(ctx context.Context, cfgPath string, curPoller *atomic.Pointer[ro
 	}
 }
 
-// startStack запускает поллер роутера и прокси под дочерним контекстом.
-func startStack(ctx context.Context, cfg *config.Config, log *slog.Logger, curPoller *atomic.Pointer[router.Poller]) <-chan struct{} {
-	ctx, cancel := context.WithCancel(ctx)
+// buildRouterConfig собирает router.Config из верхнеуровневого конфига приложения.
+func buildRouterConfig(cfg *config.Config) router.Config {
 	r := cfg.Router
-	rcfg := router.Config{
+	return router.Config{
 		Address:  r.Address,
 		APIPort:  r.APIPort,
 		APITLS:   r.APITLS,
@@ -115,6 +125,29 @@ func startStack(ctx context.Context, cfg *config.Config, log *slog.Logger, curPo
 		Interval: cfg.PollInterval,
 		Mode:     cfg.Mode,
 	}
+}
+
+// cleanupStaleRules сносит правила, которые остались от прошлой конфигурации и
+// в новой уже не управляются. На сегодня единственный такой кейс — смена WGIface:
+// маркер правил содержит суффикс iface, новый реконсилер фильтрует по новому, а
+// старые «осиротевшие» уже не увидит. Используем prev (со старым iface) — у него
+// маркер ещё совпадёт со старыми правилами.
+func cleanupStaleRules(ctx context.Context, prev *router.Config, next router.Config, log *slog.Logger) {
+	if prev == nil || prev.Iface == "" || prev.Iface == next.Iface {
+		return
+	}
+	if prev.Address == "" || prev.Password == "" {
+		return // прошлый конфиг был неполным — правил не ставили
+	}
+	log.Info("wg iface changed, cleaning rules from previous iface", "old", prev.Iface, "new", next.Iface)
+	go cleanupDivert(ctx, *prev, log)
+	go cleanupMasquerade(ctx, *prev, log)
+}
+
+// startStack запускает поллер роутера и прокси под дочерним контекстом.
+func startStack(ctx context.Context, cfg *config.Config, rcfg router.Config, log *slog.Logger, curPoller *atomic.Pointer[router.Poller]) <-chan struct{} {
+	ctx, cancel := context.WithCancel(ctx)
+	r := cfg.Router
 	poller := router.New(rcfg, log)
 	curPoller.Store(poller)
 
