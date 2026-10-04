@@ -124,7 +124,7 @@ func (p *Poller) pickUpstream(peers []markedPeer) *Upstream {
 		if m.disabled {
 			continue
 		}
-		if _, ok := strings.CutPrefix(m.comment, PeerMarker); ok {
+		if _, ok := strings.CutPrefix(strings.TrimSpace(m.comment), PeerMarker); ok {
 			marked = append(marked, m)
 		}
 	}
@@ -162,7 +162,7 @@ func (p *Poller) pickUpstream(peers []markedPeer) *Upstream {
 		RemoteAddr: addr,
 		PSK:        psk,
 	}
-	if rest, ok := strings.CutPrefix(m.comment, PeerMarker); ok {
+	if rest, ok := strings.CutPrefix(strings.TrimSpace(m.comment), PeerMarker); ok {
 		u.Comment = strings.TrimSpace(rest)
 	}
 	return u

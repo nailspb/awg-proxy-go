@@ -12,14 +12,16 @@ import (
 )
 
 type netAutoResp struct {
-	ContainerAddr string `json:"container_addr"` // первый non-loopback IPv4 контейнера
-	Gateway       string `json:"gateway"`        // default route (роутер)
+	ContainerAddr  string `json:"container_addr"`  // первый non-loopback IPv4 контейнера
+	Gateway        string `json:"gateway"`         // default route (роутер)
+	ContainerAddr6 string `json:"container_addr6"` // первый не link-local IPv6 контейнера
 }
 
 func (s *Server) netAuto(w http.ResponseWriter, _ *http.Request) {
 	writeJSON(w, http.StatusOK, netAutoResp{
-		ContainerAddr: detectContainerAddr(),
-		Gateway:       detectGateway(),
+		ContainerAddr:  detectContainerAddr(),
+		Gateway:        detectGateway(),
+		ContainerAddr6: detectContainerAddr6(),
 	})
 }
 
@@ -66,6 +68,31 @@ func detectGateway() string {
 			continue
 		}
 		return net.IPv4(raw[3], raw[2], raw[1], raw[0]).String()
+	}
+	return ""
+}
+
+// detectContainerAddr6 — первый IPv6 поднятого интерфейса, кроме loopback и
+// link-local (fe80::/10 не годится как to-address в dst-nat).
+func detectContainerAddr6() string {
+	ifs, err := net.Interfaces()
+	if err != nil {
+		return ""
+	}
+	for _, ifc := range ifs {
+		if ifc.Flags&net.FlagLoopback != 0 || ifc.Flags&net.FlagUp == 0 {
+			continue
+		}
+		addrs, _ := ifc.Addrs()
+		for _, a := range addrs {
+			ipnet, ok := a.(*net.IPNet)
+			if !ok || ipnet.IP.To4() != nil {
+				continue
+			}
+			if ip := ipnet.IP; !ip.IsLoopback() && !ip.IsLinkLocalUnicast() {
+				return ip.String()
+			}
+		}
 	}
 	return ""
 }

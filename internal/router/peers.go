@@ -2,10 +2,10 @@ package router
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net/http"
+
+	"github.com/glebov/awg-proxy-go/internal/router/binapi"
 )
 
 // Peer — пир WireGuard в удобном для фронтенда виде.
@@ -29,53 +29,32 @@ type Peer struct {
 	LastHandshake   string `json:"last_handshake,omitempty"`
 }
 
-// rosPeer — пир в представлении REST API RouterOS (все значения — строки).
-type rosPeer struct {
-	ID                     string `json:".id"`
-	Interface              string `json:"interface"`
-	Disabled               string `json:"disabled"`
-	Name                   string `json:"name"`
-	Comment                string `json:"comment"`
-	PublicKey              string `json:"public-key"`
-	PrivateKey             string `json:"private-key"`
-	PresharedKey           string `json:"preshared-key"`
-	AllowedAddress         string `json:"allowed-address"`
-	EndpointAddress        string `json:"endpoint-address"`
-	EndpointPort           string `json:"endpoint-port"`
-	PersistentKeepalive    string `json:"persistent-keepalive"`
-	CurrentEndpointAddress string `json:"current-endpoint-address"`
-	CurrentEndpointPort    string `json:"current-endpoint-port"`
-	Rx                     string `json:"rx"`
-	Tx                     string `json:"tx"`
-	LastHandshake          string `json:"last-handshake"`
-}
-
-func (r rosPeer) toPeer() Peer {
-	ce := r.CurrentEndpointAddress
-	if ce != "" && r.CurrentEndpointPort != "" {
-		ce = ce + ":" + r.CurrentEndpointPort
+func peerFromMap(m map[string]string) Peer {
+	ce := m["current-endpoint-address"]
+	if ce != "" && m["current-endpoint-port"] != "" {
+		ce = ce + ":" + m["current-endpoint-port"]
 	}
 	return Peer{
-		ID:                  r.ID,
-		Interface:           r.Interface,
-		Disabled:            r.Disabled == "true",
-		Name:                r.Name,
-		Comment:             r.Comment,
-		PublicKey:           r.PublicKey,
-		PrivateKey:          r.PrivateKey,
-		PresharedKey:        r.PresharedKey,
-		AllowedAddress:      r.AllowedAddress,
-		EndpointAddress:     r.EndpointAddress,
-		EndpointPort:        r.EndpointPort,
-		PersistentKeepalive: r.PersistentKeepalive,
+		ID:                  m[".id"],
+		Interface:           m["interface"],
+		Disabled:            m["disabled"] == "true",
+		Name:                m["name"],
+		Comment:             m["comment"],
+		PublicKey:           m["public-key"],
+		PrivateKey:          m["private-key"],
+		PresharedKey:        m["preshared-key"],
+		AllowedAddress:      m["allowed-address"],
+		EndpointAddress:     m["endpoint-address"],
+		EndpointPort:        m["endpoint-port"],
+		PersistentKeepalive: m["persistent-keepalive"],
 		CurrentEndpoint:     ce,
-		Rx:                  r.Rx,
-		Tx:                  r.Tx,
-		LastHandshake:       r.LastHandshake,
+		Rx:                  m["rx"],
+		Tx:                  m["tx"],
+		LastHandshake:       m["last-handshake"],
 	}
 }
 
-// Client управляет пирами на роутере через REST API.
+// Client управляет пирами на роутере через bin-API.
 type Client struct {
 	cfg Config
 	log *slog.Logger
@@ -83,11 +62,12 @@ type Client struct {
 
 func NewClient(cfg Config, log *slog.Logger) *Client { return &Client{cfg: cfg, log: log} }
 
-// Verify проверяет, что креды подходят к роутеру (для авторизации веб-входа):
-// успешный REST-запрос = валидные логин/пароль.
+// Verify проверяет, что креды подходят к роутеру (для авторизации веб-входа).
+// Делает одноразовый Dial+Login+Close, чтобы попытки ввода неверного пароля
+// не оседали персистентным коннектом в кеше Dialer.
 func (c *Client) Verify(ctx context.Context) error {
-	_, err := c.cfg.apiReq(ctx, http.MethodGet, "/rest/system/identity", nil)
-	return err
+	addr := fmt.Sprintf("%s:%d", c.cfg.Address, c.cfg.APIPort)
+	return binapi.Verify(ctx, addr, c.cfg.APITLS, c.cfg.User, c.cfg.Password)
 }
 
 // ServerKey возвращает публичный ключ WG-интерфейса роутера (base64).
@@ -115,26 +95,18 @@ type Interface struct {
 // ListInterfaces возвращает все WG-интерфейсы роутера (для выбора в UI).
 // Также подмешивает /ip/address (best-effort: ошибка чтения адресов не валит весь список).
 func (c *Client) ListInterfaces(ctx context.Context) ([]Interface, error) {
-	data, err := c.cfg.apiReq(ctx, http.MethodGet, "/rest/interface/wireguard", nil)
+	rows, err := c.cfg.callPrint(ctx, "/interface/wireguard")
 	if err != nil {
 		return nil, err
 	}
-	var ifaces []struct {
-		Name       string `json:"name"`
-		PublicKey  string `json:"public-key"`
-		ListenPort string `json:"listen-port"`
-	}
-	if err := json.Unmarshal(data, &ifaces); err != nil {
-		return nil, fmt.Errorf("decode: %w", err)
-	}
 	addrs := c.ifaceAddrs(ctx)
-	out := make([]Interface, 0, len(ifaces))
-	for _, it := range ifaces {
+	out := make([]Interface, 0, len(rows))
+	for _, it := range rows {
 		out = append(out, Interface{
-			Name:       it.Name,
-			PublicKey:  it.PublicKey,
-			ListenPort: it.ListenPort,
-			Address:    addrs[it.Name],
+			Name:       it["name"],
+			PublicKey:  it["public-key"],
+			ListenPort: it["listen-port"],
+			Address:    addrs[it["name"]],
 		})
 	}
 	return out, nil
@@ -149,24 +121,16 @@ type Address struct {
 // ListAddresses возвращает все активные адреса /ip/address с роутера.
 // Disabled-записи отфильтрованы.
 func (c *Client) ListAddresses(ctx context.Context) ([]Address, error) {
-	data, err := c.cfg.apiReq(ctx, http.MethodGet, "/rest/ip/address", nil)
+	rows, err := c.cfg.callPrint(ctx, "/ip/address")
 	if err != nil {
 		return nil, err
 	}
-	var rows []struct {
-		Interface string `json:"interface"`
-		Address   string `json:"address"`
-		Disabled  string `json:"disabled"`
-	}
-	if err := json.Unmarshal(data, &rows); err != nil {
-		return nil, fmt.Errorf("decode addresses: %w", err)
-	}
 	out := make([]Address, 0, len(rows))
 	for _, r := range rows {
-		if r.Disabled == "true" {
+		if r["disabled"] == "true" {
 			continue
 		}
-		out = append(out, Address{Interface: r.Interface, Address: r.Address})
+		out = append(out, Address{Interface: r["interface"], Address: r["address"]})
 	}
 	return out, nil
 }
@@ -174,27 +138,19 @@ func (c *Client) ListAddresses(ctx context.Context) ([]Address, error) {
 // ifaceAddrs строит iface→первый адрес из /ip/address. Ошибки не возвращает —
 // при недоступности отдаём пустую карту (адрес опциональный).
 func (c *Client) ifaceAddrs(ctx context.Context) map[string]string {
-	data, err := c.cfg.apiReq(ctx, http.MethodGet, "/rest/ip/address", nil)
+	rows, err := c.cfg.callPrint(ctx, "/ip/address")
 	if err != nil {
 		c.log.Warn("list ip addresses failed", "err", err)
 		return nil
 	}
-	var rows []struct {
-		Interface string `json:"interface"`
-		Address   string `json:"address"`
-		Disabled  string `json:"disabled"`
-	}
-	if err := json.Unmarshal(data, &rows); err != nil {
-		c.log.Warn("decode ip addresses failed", "err", err)
-		return nil
-	}
 	m := make(map[string]string, len(rows))
 	for _, r := range rows {
-		if r.Disabled == "true" {
+		if r["disabled"] == "true" {
 			continue
 		}
-		if _, ok := m[r.Interface]; !ok {
-			m[r.Interface] = r.Address
+		iface := r["interface"]
+		if _, ok := m[iface]; !ok {
+			m[iface] = r["address"]
 		}
 	}
 	return m
@@ -202,18 +158,14 @@ func (c *Client) ifaceAddrs(ctx context.Context) map[string]string {
 
 // ListPeers возвращает пиров выбранного интерфейса.
 func (c *Client) ListPeers(ctx context.Context) ([]Peer, error) {
-	data, err := c.cfg.apiReq(ctx, http.MethodGet, "/rest/interface/wireguard/peers", nil)
+	rows, err := c.cfg.callPrint(ctx, "/interface/wireguard/peers")
 	if err != nil {
 		return nil, err
 	}
-	var ros []rosPeer
-	if err := json.Unmarshal(data, &ros); err != nil {
-		return nil, fmt.Errorf("decode: %w", err)
-	}
-	peers := make([]Peer, 0, len(ros))
-	for _, r := range ros {
-		if r.Interface == c.cfg.Iface {
-			peers = append(peers, r.toPeer())
+	peers := make([]Peer, 0, len(rows))
+	for _, r := range rows {
+		if r["interface"] == c.cfg.Iface {
+			peers = append(peers, peerFromMap(r))
 		}
 	}
 	return peers, nil
@@ -221,7 +173,8 @@ func (c *Client) ListPeers(ctx context.Context) ([]Peer, error) {
 
 // AddPeer создаёт нового пира.
 func (c *Client) AddPeer(ctx context.Context, p Peer) error {
-	return c.write(ctx, http.MethodPut, "/rest/interface/wireguard/peers", c.body(p, true))
+	_, err := c.cfg.callAdd(ctx, "/interface/wireguard/peers", c.body(p, true))
+	return err
 }
 
 // UpdatePeer изменяет существующего пира по id.
@@ -229,7 +182,7 @@ func (c *Client) UpdatePeer(ctx context.Context, id string, p Peer) error {
 	if id == "" {
 		return fmt.Errorf("peer id required")
 	}
-	return c.write(ctx, http.MethodPatch, "/rest/interface/wireguard/peers/"+id, c.body(p, false))
+	return c.cfg.callSet(ctx, "/interface/wireguard/peers", id, c.body(p, false))
 }
 
 // SetDisabled включает/выключает пира.
@@ -237,7 +190,7 @@ func (c *Client) SetDisabled(ctx context.Context, id string, disabled bool) erro
 	if id == "" {
 		return fmt.Errorf("peer id required")
 	}
-	return c.write(ctx, http.MethodPatch, "/rest/interface/wireguard/peers/"+id,
+	return c.cfg.callSet(ctx, "/interface/wireguard/peers", id,
 		map[string]string{"disabled": boolStr(disabled)})
 }
 
@@ -246,8 +199,7 @@ func (c *Client) DeletePeer(ctx context.Context, id string) error {
 	if id == "" {
 		return fmt.Errorf("peer id required")
 	}
-	_, err := c.cfg.apiReq(ctx, http.MethodDelete, "/rest/interface/wireguard/peers/"+id, nil)
-	return err
+	return c.cfg.callRemove(ctx, "/interface/wireguard/peers", id)
 }
 
 // body собирает поля пира для записи (формат RouterOS). withIface — добавлять ли
@@ -273,6 +225,12 @@ func (c *Client) body(p Peer, withIface bool) map[string]string {
 	if withIface {
 		m["interface"] = c.cfg.Iface
 	}
+	// Пустые числовые поля RouterOS не принимает; в add/set убираем их.
+	for k, v := range m {
+		if v == "" && numericField(k) {
+			delete(m, k)
+		}
+	}
 	return m
 }
 
@@ -284,24 +242,8 @@ func boolStr(b bool) string {
 }
 
 // numericField — поле, которое RouterOS отвергает пустым ("an integer required").
-// Такие пропускаем при PATCH, чтобы не сломать запрос; текстовые поля наоборот
+// Такие пропускаем при set/add, чтобы не сломать запрос; текстовые поля наоборот
 // шлём даже пустыми — иначе их не очистить (привет, [awgproxy]-маркер).
 func numericField(k string) bool {
 	return k == "endpoint-port" || k == "persistent-keepalive"
-}
-
-func (c *Client) write(ctx context.Context, method, path string, body map[string]string) error {
-	var b any
-	if body != nil {
-		m := make(map[string]string, len(body))
-		for k, v := range body {
-			if v == "" && numericField(k) {
-				continue
-			}
-			m[k] = v
-		}
-		b = m
-	}
-	_, err := c.cfg.apiReq(ctx, method, path, b)
-	return err
 }

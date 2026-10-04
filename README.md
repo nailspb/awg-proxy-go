@@ -5,7 +5,7 @@
 - **server (1:N)** — точка входа для внешних AmneziaWG-клиентов; за прокси стоит
   нативный WG-сервер RouterOS. Аналог
   [amneziawg-mikrotik-c](https://github.com/timbrs/amneziawg-mikrotik-c), но список
-  клиентов берётся **динамически с роутера через REST API**.
+  клиентов берётся **динамически с роутера через бинарный MikroTik API**.
 - **client (1:1)** — роутер выступает AmneziaWG-клиентом: WG-out с роутера заворачивается
   dst-nat-правилом в контейнер, обфусцируется и уходит во внешний AmneziaWG-сервер.
 
@@ -27,9 +27,11 @@ RouterOS WG-out ──(dst-nat в контейнер)──▶ awgproxy ──(�
   пакет уходит дальше.
 - Ответ: тип → `H1..H4`, **MAC1 пересчитывается** под pubkey второй стороны,
   добавляется префикс, пакет уходит по адресу из таблицы сессий.
-- Каждые `poll_interval_sec` сервис читает с роутера через **REST API** pubkey
-  WG-интерфейса, список пиров и адреса интерфейсов (для авто-NAT и автоопределения
-  параметров).
+- Каждые `poll_interval_sec` сервис читает с роутера через **бинарный MikroTik API**
+  (порт `8728`, либо `8729` по api-ssl) pubkey WG-интерфейса, список пиров и адреса
+  интерфейсов (для авто-NAT и автоопределения параметров). Соединение **persistent**:
+  один логин на всё время жизни контейнера — в `Active Users` роутера висит одна
+  запись, а не лавина «активности».
 
 ## Конфигурация
 
@@ -66,6 +68,7 @@ RouterOS WG-out ──(dst-nat в контейнер)──▶ awgproxy ──(�
 | `server.obfuscation.h1..h4` | | `1/2/3/4` | магические заголовки типов |
 | `server.router.*` | | | доступ к роутеру (см. ниже) |
 | `server.router.wg_iface` | ✔ | | WG-интерфейс роутера (его пиры обслуживает прокси) |
+| `server.container_addr6` | | | IPv6 контейнера на veth; если задан, `divert` дублирует dst-nat в `/ipv6/firewall/nat` (приём клиентов по IPv6) |
 
 **Секция `client`** (когда `mode=client`):
 
@@ -80,20 +83,22 @@ RouterOS WG-out ──(dst-nat в контейнер)──▶ awgproxy ──(�
 | `client.obfuscation.*` | | | параметры обфускации (берутся из конфига внешнего AmneziaWG-сервера) |
 | `client.router.*` | | | доступ к роутеру (см. ниже) |
 | `client.router.wg_iface` | ✔ | | клиентский WG-интерфейс роутера — его трафик заворачивается в прокси. Адрес апстрима AmneziaWG берётся из помеченного `[awgproxy]` пира этого интерфейса |
+| `client.container_addr6` | при IPv6-апстриме | | IPv6 контейнера на veth; нужен, если endpoint помеченного пира — IPv6-адрес |
 
 **Подсекция `router`** (одинаковая для `server` и `client`):
 
 | Поле | Обяз. | По умолч. | Назначение |
 |---|---|---|---|
 | `router.address` | ✔ | | хост роутера без порта (обычно gateway на veth) |
-| `router.api_port` | | `443` | порт REST API (`/ip/service www` или `www-ssl`) |
-| `router.api_tls` | | `false` | REST API по HTTPS (TLS-сертификат не проверяется) |
+| `router.api_port` | | `8728` | порт MikroTik API (`/ip/service api` — 8728, или `api-ssl` — 8729) |
+| `router.api_tls` | | `false` | TLS поверх API (api-ssl, TLS-сертификат не проверяется) |
 | `router.user` | | `admin` | пользователь RouterOS |
 | `router.password` | ✔ | | пароль |
 | `router.wg_iface` | | | задаётся в секции режима, см. выше |
 
-Доступ к роутеру — только через **REST API** RouterOS (`/rest/...`).
-Значения `obfuscation.*` должны совпадать с профилем AmneziaWG второй стороны.
+Доступ к роутеру — только через **бинарный MikroTik API** RouterOS (TCP 8728 / 8729).
+REST (`/rest/...`) не используется. Значения `obfuscation.*` должны совпадать с
+профилем AmneziaWG второй стороны.
 
 ### NAT-правила, которыми управляет сервис
 
@@ -106,6 +111,18 @@ RouterOS WG-out ──(dst-nat в контейнер)──▶ awgproxy ──(�
 - `divert` (`client`): `chain=output`, исходящий WG-трафик роутера на апстрим
   → `container_addr:listen`.
 - `masquerade`: `chain=srcnat`, `src-address` = сеть WG-интерфейса.
+
+**IPv6.** Если задан `container_addr6`, `divert` ведёт такое же правило в `/ipv6/firewall/nat`
+(тот же маркер, адреса — `/128`):
+
+- `server`: правило ставится в обе таблицы — клиенты могут приходить и по IPv4, и по IPv6.
+- `client`: таблица выбирается по адресу апстрима (endpoint помеченного пира) — IPv4 → `/ip`,
+  IPv6 → `/ipv6`; из другой таблицы правило снимается.
+
+IPv6-связность контейнера настраивается вручную: IPv6-адрес на veth (и `gateway6`),
+адрес роутера в той же сети, для client-режима — srcnat masquerade этой сети в WAN
+(`/ipv6 firewall nat`), для server-режима — разрешить в `/ipv6 firewall filter` входящий UDP
+на внешний порт.
 
 ## Веб-интерфейс
 
@@ -120,7 +137,7 @@ RouterOS WG-out ──(dst-nat в контейнер)──▶ awgproxy ──(�
 сначала можно подключить роутер — остальная конфигурация подтянется и допишется через UI.
 
 **Вход:** логин/пароль — те же, что у роутера; проверяются REST-запросом
-к роутеру (`/rest/system/identity`). Сессия живёт 12 ч (в куке, не переживает рестарт
+к роутеру (`/system/identity/print`). Сессия живёт 12 ч (в куке, не переживает рестарт
 контейнера). Если `router.address` не задан **или роутер недоступен**
 (быстрый TCP-пинг перед входом), авторизация отключается и панель открыта без
 входа — чтобы не запереть себя при лежащем роутере. Перебор пароля ограничен:
@@ -133,6 +150,7 @@ RouterOS WG-out ──(dst-nat в контейнер)──▶ awgproxy ──(�
 
 - `router.address`, `server.remote_addr` — gateway контейнера (из `/proc/net/route`);
 - `container_addr` — первый IPv4 контейнера;
+- `container_addr6` — первый IPv6 контейнера (кроме link-local);
 - `server.remote_port` — `listen-port` выбранного WG-интерфейса (читается с роутера);
 - `public_endpoint.host` (кнопка **▾**) — выпадающий список IP-адресов интерфейсов
   роутера.
@@ -143,8 +161,8 @@ RouterOS WG-out ──(dst-nat в контейнер)──▶ awgproxy ──(�
 ### Управление пирами
 
 Вкладка **Пиры** показывает пиров выбранного интерфейса (`wg_iface`) и позволяет
-добавлять/править/удалять их и включать-выключать. Операции идут через REST API
-(`/rest/interface/wireguard/peers`).
+добавлять/править/удалять их и включать-выключать. Операции идут через MikroTik API
+(`/interface/wireguard/peers/...`).
 Редактируемые поля: `name`, `comment`, `allowed-address`, `endpoint-address/port`,
 `persistent-keepalive`, `preshared-key`. Кнопка **Сгенерировать** создаёт пару ключей
 WireGuard локально (curve25519): публичный подставляется в пира, приватный показывается
@@ -222,11 +240,16 @@ RouterOS) и пишет `awgproxy-<version>-<build>-<arch>.tar.gz`. Номер �
     /interface/wireguard/add name=wg-awg-client
     /ip/address/add address=172.17.0.1/24 interface=wg-awg-client
    ```
-8. Проверить доступ к роутеру по api: включить `/ip/service` `www-ssl` (HTTPS, порт 443) или `www`
-   (HTTP, порт 80).
+8. Включить MikroTik API на роутере (порт **8728**, или **8729** для TLS):
+   ```
+    /ip service set api disabled=no
+    # либо TLS-вариант:
+    # /ip service set api-ssl disabled=no
+   ```
+   В UI прокси: для api-ssl поставить тоггл «API-SSL» и `api_port=8729`.
 9. зайти в веб панель управления и настроить прокси по http://your-route-address:8088/ 
 
-> ⚠️ Контейнер не проверяет TLS-сертификат REST API (доверенная сеть роутера).
+> ⚠️ При `api-ssl` контейнер не проверяет TLS-сертификат (сеть роутера доверенная).
 
 
 ## Деплой в RouterOS 7.23 (server-mode)
@@ -268,11 +291,16 @@ RouterOS) и пишет `awgproxy-<version>-<build>-<arch>.tar.gz`. Номер �
     /interface/wireguard/add name=wg-awg
     /ip/address/add address=172.16.0.1/24 interface=wg-awg
    ```
-8. Проверить доступ к роутеру по api: включить `/ip/service` `www-ssl` (HTTPS, порт 443) или `www`
-   (HTTP, порт 80).
+8. Включить MikroTik API на роутере (порт **8728**, или **8729** для TLS):
+   ```
+    /ip service set api disabled=no
+    # либо TLS-вариант:
+    # /ip service set api-ssl disabled=no
+   ```
+   В UI прокси: для api-ssl поставить тоггл «API-SSL» и `api_port=8729`.
 9. зайти в веб панель управления и настроить прокси по http://your-route-address:8088/
 
-> ⚠️ Контейнер не проверяет TLS-сертификат REST API (доверенная сеть роутера).
+> ⚠️ При `api-ssl` контейнер не проверяет TLS-сертификат (сеть роутера доверенная).
 
 
 ## Идентификация клиента (MAC1 ответа)
@@ -281,7 +309,7 @@ MAC1 ответа клиенту считается по pubkey конкретн
 способами:
 
 - **Точно**, если роутер отдаёт приватный ключ WG-интерфейса (поле `private-key` в
-  `/rest/interface/wireguard` или скриптовом `get`): из `init` расшифровывается
+  ответе `/interface/wireguard/print`): из `init` расшифровывается
   `encrypted_static` → static-pubkey клиента известен сразу, без перебора.
 - **Перебором (burst)**, если приватного ключа нет: ответ отправляется копиями под все
   известные pubkey-кандидаты, клиент примет копию с верным MAC1. Срабатывает один раз

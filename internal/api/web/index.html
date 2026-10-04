@@ -278,6 +278,14 @@
                 </div>
               </div>
               <div class="form-row">
+                <label class="form-label" data-i18n="label.containerAddr6">Container IPv6</label>
+                <div class="form-control">
+                  <input type="text" class="mono" data-key="server.container_addr6" placeholder="fd00:172:17::2">
+                  <button type="button" class="icon-btn auto-btn" data-auto="container_addr6" data-i18n-title="btn.autoDetect" title="Detect automatically">⌖</button>
+                  <small class="field-hint" data-i18n="help.containerAddr6Server">Optional. IPv6 of this container on the veth — when set, the same dst-nat rule is also maintained in /ipv6/firewall/nat so clients can connect over IPv6.</small>
+                </div>
+              </div>
+              <div class="form-row">
                 <label class="form-label" data-i18n="label.publicEndpoint">Public endpoint</label>
                 <div class="form-control">
                   <input type="text" class="mono" id="pe-host" placeholder="vpn.example.com">
@@ -315,6 +323,14 @@
                   <input type="text" class="mono" data-key="client.container_addr" placeholder="172.17.0.2">
                   <button type="button" class="icon-btn auto-btn" data-auto="container_addr" data-i18n-title="btn.autoDetect" title="Detect automatically">⌖</button>
                   <small class="field-hint" data-i18n="help.containerAddr">IP of this container on the router-side veth — used as the to-address of the dst-nat rule.</small>
+                </div>
+              </div>
+              <div class="form-row">
+                <label class="form-label" data-i18n="label.containerAddr6">Container IPv6</label>
+                <div class="form-control">
+                  <input type="text" class="mono" data-key="client.container_addr6" placeholder="fd00:172:17::2">
+                  <button type="button" class="icon-btn auto-btn" data-auto="container_addr6" data-i18n-title="btn.autoDetect" title="Detect automatically">⌖</button>
+                  <small class="field-hint" data-i18n="help.containerAddr6Client">Optional. IPv6 of this container on the veth — required only if the marked peer's endpoint is an IPv6 address (the rule then goes to /ipv6/firewall/nat).</small>
                 </div>
               </div>
               <div class="form-row">

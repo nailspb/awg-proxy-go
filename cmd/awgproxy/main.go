@@ -228,23 +228,57 @@ func makeClientDivertHook(rcfg router.Config, cfg *config.Config, log *slog.Logg
 		log.Error("invalid listen, divert disabled", "listen", cfg.Listen, "err", err)
 		return nil
 	}
+	rec6 := router.NewNatReconciler6(rcfg, log)
+	containerAddr6, _ := netip.ParseAddr(cfg.ContainerAddr6) // пусто → invalid, IPv6-апстрим не обслуживаем
+	var warned6 bool
+	var lastIs6 *bool // семейство апстрима на прошлом тике; nil — ещё не знаем
 	return func(ctx context.Context, snap *router.Snapshot) {
 		if snap.Upstream == nil || snap.WGListenPort == 0 {
-			// Нет апстрима — снимаем правило (если оно было).
-			if err := rec.Remove(ctx); err != nil {
+			// Нет апстрима — снимаем правила (если они были).
+			for _, r := range []*router.NatReconciler{rec, rec6} {
+				if err := r.Remove(ctx); err != nil {
+					log.Warn("nat remove failed", "err", err)
+				}
+			}
+			lastIs6 = nil
+			return
+		}
+		// Правило ставим в таблицу того семейства, что и адрес апстрима; из другой
+		// снимаем, когда семейство сменилось (endpoint peer'а перевели v4↔v6) или
+		// на первом тике — могло остаться от прошлого запуска.
+		dst := snap.Upstream.RemoteAddr.Addr().Unmap()
+		active, idle, to := rec, rec6, containerAddr
+		if dst.Is6() {
+			active, idle, to = rec6, rec, containerAddr6
+		}
+		if lastIs6 == nil || *lastIs6 != dst.Is6() {
+			if err := idle.Remove(ctx); err != nil {
+				log.Warn("nat remove failed", "err", err)
+			} else {
+				is6 := dst.Is6()
+				lastIs6 = &is6
+			}
+		}
+		if !to.IsValid() {
+			if !warned6 {
+				log.Warn("upstream is IPv6 but container_addr6 is not set, divert skipped", "upstream", dst)
+				warned6 = true
+			}
+			if err := active.Remove(ctx); err != nil {
 				log.Warn("nat remove failed", "err", err)
 			}
 			return
 		}
+		warned6 = false
 		want := router.DivertRule{
 			Chain:      router.ChainOutput,
 			SrcPort:    snap.WGListenPort,
-			DstAddress: snap.Upstream.RemoteAddr.Addr(),
+			DstAddress: dst,
 			DstPort:    int(snap.Upstream.RemoteAddr.Port()),
-			ToAddress:  containerAddr,
+			ToAddress:  to,
 			ToPort:     toPort,
 		}
-		if err := rec.Ensure(ctx, want); err != nil {
+		if err := active.Ensure(ctx, want); err != nil {
 			log.Warn("nat reconcile failed", "err", err)
 		}
 	}
@@ -283,9 +317,27 @@ func makeServerDivertHook(rcfg router.Config, cfg *config.Config, log *slog.Logg
 		ToAddress: containerAddr,
 		ToPort:    toPort,
 	}
+	// IPv6: то же правило в /ipv6/firewall/nat, если задан container_addr6;
+	// иначе — один раз снимаем (могло остаться от прошлой конфигурации).
+	rec6 := router.NewNatReconciler6(rcfg, log)
+	want6 := want
+	want6.ToAddress, _ = netip.ParseAddr(cfg.ContainerAddr6)
+	var cleaned6 bool
 	return func(ctx context.Context, _ *router.Snapshot) {
 		if err := rec.Ensure(ctx, want); err != nil {
 			log.Warn("nat reconcile failed", "err", err)
+		}
+		switch {
+		case want6.ToAddress.IsValid():
+			if err := rec6.Ensure(ctx, want6); err != nil {
+				log.Warn("nat reconcile failed", "err", err)
+			}
+		case !cleaned6:
+			if err := rec6.Remove(ctx); err != nil {
+				log.Warn("nat remove failed", "err", err)
+				return
+			}
+			cleaned6 = true
 		}
 	}
 }
@@ -302,9 +354,10 @@ func portFromEndpoint(ep string) (int, error) {
 // cleanupDivert убирает «наше» NAT-правило при выключенном divert (например,
 // оператор снял галку — старое правило не должно остаться болтаться на роутере).
 func cleanupDivert(ctx context.Context, rcfg router.Config, log *slog.Logger) {
-	rec := router.NewNatReconciler(rcfg, log)
-	if err := rec.Remove(ctx); err != nil {
-		log.Warn("nat cleanup failed", "err", err)
+	for _, rec := range []*router.NatReconciler{router.NewNatReconciler(rcfg, log), router.NewNatReconciler6(rcfg, log)} {
+		if err := rec.Remove(ctx); err != nil {
+			log.Warn("nat cleanup failed", "err", err)
+		}
 	}
 }
 

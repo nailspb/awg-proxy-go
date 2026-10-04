@@ -2,10 +2,8 @@ package router
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"net/netip"
 	"strconv"
 )
@@ -49,10 +47,11 @@ type NatReconciler struct {
 	cfg     Config
 	log     *slog.Logger
 	lastLog string // защита лога от спама: пишем только при смене состояния
+	path    string // /ip/firewall/nat или /ipv6/firewall/nat
 }
 
 func NewNatReconciler(cfg Config, log *slog.Logger) *NatReconciler {
-	return &NatReconciler{cfg: cfg, log: log}
+	return &NatReconciler{cfg: cfg, log: log, path: "/ip/firewall/nat"}
 }
 
 // Ensure приводит NAT-правило к want. Безопасно вызывать многократно.
@@ -69,12 +68,12 @@ func (n *NatReconciler) Ensure(ctx context.Context, want DivertRule) error {
 
 	// Лишние правила (если по ошибке наплодили) — удаляем, оставляем первое.
 	for i := 1; i < len(cur); i++ {
-		_, _ = n.cfg.apiReq(ctx, http.MethodDelete, "/rest/ip/firewall/nat/"+cur[i].ID, nil)
+		_ = n.cfg.callRemove(ctx, n.path, cur[i].ID)
 		n.log.Warn("nat divert: removed duplicate rule", "id", cur[i].ID)
 	}
 
 	if len(cur) == 0 {
-		if _, err := n.cfg.apiReq(ctx, http.MethodPut, "/rest/ip/firewall/nat", wantFields); err != nil {
+		if _, err := n.cfg.callAdd(ctx, n.path, wantFields); err != nil {
 			return fmt.Errorf("add nat: %w", err)
 		}
 		n.logTransition("installed", "src_port", want.SrcPort, "dst", want.DstAddress, "to", want.ToAddress)
@@ -82,13 +81,13 @@ func (n *NatReconciler) Ensure(ctx context.Context, want DivertRule) error {
 	}
 
 	existing := cur[0]
-	// Смена chain (переключение режима server↔client) — PATCH тут не годится,
+	// Смена chain (переключение режима server↔client) — set тут не годится,
 	// удаляем старое правило и создаём с нуля.
 	if existing.Chain != want.Chain {
-		if _, err := n.cfg.apiReq(ctx, http.MethodDelete, "/rest/ip/firewall/nat/"+existing.ID, nil); err != nil {
+		if err := n.cfg.callRemove(ctx, n.path, existing.ID); err != nil {
 			return fmt.Errorf("delete stale nat: %w", err)
 		}
-		if _, err := n.cfg.apiReq(ctx, http.MethodPut, "/rest/ip/firewall/nat", wantFields); err != nil {
+		if _, err := n.cfg.callAdd(ctx, n.path, wantFields); err != nil {
 			return fmt.Errorf("recreate nat: %w", err)
 		}
 		n.logTransition("rebuilt", "chain", want.Chain)
@@ -99,7 +98,7 @@ func (n *NatReconciler) Ensure(ctx context.Context, want DivertRule) error {
 		n.logTransition("active")
 		return nil
 	}
-	if _, err := n.cfg.apiReq(ctx, http.MethodPatch, "/rest/ip/firewall/nat/"+existing.ID, diff); err != nil {
+	if err := n.cfg.callSet(ctx, n.path, existing.ID, diff); err != nil {
 		return fmt.Errorf("update nat: %w", err)
 	}
 	n.logTransition("updated", "fields", diff)
@@ -113,7 +112,7 @@ func (n *NatReconciler) Remove(ctx context.Context) error {
 		return err
 	}
 	for _, r := range cur {
-		if _, err := n.cfg.apiReq(ctx, http.MethodDelete, "/rest/ip/firewall/nat/"+r.ID, nil); err != nil {
+		if err := n.cfg.callRemove(ctx, n.path, r.ID); err != nil {
 			return fmt.Errorf("delete nat %s: %w", r.ID, err)
 		}
 	}
@@ -131,6 +130,9 @@ func (r DivertRule) validate() error {
 		}
 		if !r.DstAddress.IsValid() {
 			return fmt.Errorf("invalid dst-address")
+		}
+		if r.DstAddress.Is6() != r.ToAddress.Is6() {
+			return fmt.Errorf("dst-address %s and to-address %s are of different families", r.DstAddress, r.ToAddress)
 		}
 	case ChainDstNat:
 		// src-port / dst-address не используются
@@ -167,6 +169,16 @@ func (r DivertRule) fields() map[string]string {
 		f["src-port"] = strconv.Itoa(r.SrcPort)
 		f["dst-address"] = r.DstAddress.String()
 	}
+	if r.ToAddress.Is6() {
+		// /ipv6/firewall/nat: поле to-address (не to-addresses), адреса — префиксы.
+		// Пишем сразу с /128 — в таком виде RouterOS их печатает, иначе diff
+		// находил бы расхождение на каждом тике.
+		delete(f, "to-addresses")
+		f["to-address"] = netip.PrefixFrom(r.ToAddress, 128).String()
+		if r.Chain == ChainOutput {
+			f["dst-address"] = netip.PrefixFrom(r.DstAddress, 128).String()
+		}
+	}
 	return f
 }
 
@@ -179,36 +191,51 @@ func (n *NatReconciler) logTransition(action string, attrs ...any) {
 	n.log.Info("nat divert "+action, attrs...)
 }
 
-// natRule — представление правила firewall/nat в REST.
+// natRule — представление правила firewall/nat (binapi).
 type natRule struct {
-	ID          string `json:".id"`
-	Chain       string `json:"chain"`
-	Protocol    string `json:"protocol"`
-	Action      string `json:"action"`
-	SrcAddress  string `json:"src-address"`
-	SrcPort     string `json:"src-port"`
-	DstAddress  string `json:"dst-address"`
-	DstPort     string `json:"dst-port"`
-	ToAddresses string `json:"to-addresses"`
-	ToPorts     string `json:"to-ports"`
-	Comment     string `json:"comment"`
-	Disabled    string `json:"disabled"`
+	ID          string
+	Chain       string
+	Protocol    string
+	Action      string
+	SrcAddress  string
+	SrcPort     string
+	DstAddress  string
+	DstPort     string
+	ToAddresses string
+	ToPorts     string
+	Comment     string
+	Disabled    string
+	ToAddress   string // /ipv6/firewall/nat: вместо to-addresses
+}
+
+func natRuleFromMap(m map[string]string) natRule {
+	return natRule{
+		ID:          m[".id"],
+		Chain:       m["chain"],
+		Protocol:    m["protocol"],
+		Action:      m["action"],
+		SrcAddress:  m["src-address"],
+		SrcPort:     m["src-port"],
+		DstAddress:  m["dst-address"],
+		DstPort:     m["dst-port"],
+		ToAddresses: m["to-addresses"],
+		ToPorts:     m["to-ports"],
+		Comment:     m["comment"],
+		Disabled:    m["disabled"],
+		ToAddress:   m["to-address"],
+	}
 }
 
 func (n *NatReconciler) list(ctx context.Context) ([]natRule, error) {
-	data, err := n.cfg.apiReq(ctx, http.MethodGet, "/rest/ip/firewall/nat", nil)
+	rows, err := n.cfg.callPrint(ctx, n.path)
 	if err != nil {
 		return nil, err
 	}
-	var all []natRule
-	if err := json.Unmarshal(data, &all); err != nil {
-		return nil, fmt.Errorf("decode nat list: %w", err)
-	}
 	want := n.cfg.natComment()
 	var ours []natRule
-	for _, r := range all {
-		if r.Comment == want {
-			ours = append(ours, r)
+	for _, r := range rows {
+		if r["comment"] == want {
+			ours = append(ours, natRuleFromMap(r))
 		}
 	}
 	return ours, nil
@@ -227,6 +254,7 @@ func diffFields(got natRule, want map[string]string) map[string]string {
 		"to-ports":     got.ToPorts,
 		"comment":      got.Comment,
 		"disabled":     got.Disabled,
+		"to-address":   got.ToAddress,
 	}
 	diff := map[string]string{}
 	for k, v := range want {
@@ -270,11 +298,11 @@ func (m *MasqueradeReconciler) Ensure(ctx context.Context, network netip.Prefix)
 	}
 	// Лишние дубли — снести, оставить первый.
 	for i := 1; i < len(cur); i++ {
-		_, _ = m.cfg.apiReq(ctx, http.MethodDelete, "/rest/ip/firewall/nat/"+cur[i].ID, nil)
+		_ = m.cfg.callRemove(ctx, "/ip/firewall/nat", cur[i].ID)
 		m.log.Warn("masquerade: removed duplicate rule", "id", cur[i].ID)
 	}
 	if len(cur) == 0 {
-		if _, err := m.cfg.apiReq(ctx, http.MethodPut, "/rest/ip/firewall/nat", want); err != nil {
+		if _, err := m.cfg.callAdd(ctx, "/ip/firewall/nat", want); err != nil {
 			return fmt.Errorf("add masquerade: %w", err)
 		}
 		m.logTransition("installed", "src", network)
@@ -286,7 +314,7 @@ func (m *MasqueradeReconciler) Ensure(ctx context.Context, network netip.Prefix)
 		m.logTransition("active")
 		return nil
 	}
-	if _, err := m.cfg.apiReq(ctx, http.MethodPatch, "/rest/ip/firewall/nat/"+existing.ID, diff); err != nil {
+	if err := m.cfg.callSet(ctx, "/ip/firewall/nat", existing.ID, diff); err != nil {
 		return fmt.Errorf("update masquerade: %w", err)
 	}
 	m.logTransition("updated", "fields", diff)
@@ -300,7 +328,7 @@ func (m *MasqueradeReconciler) Remove(ctx context.Context) error {
 		return err
 	}
 	for _, r := range cur {
-		if _, err := m.cfg.apiReq(ctx, http.MethodDelete, "/rest/ip/firewall/nat/"+r.ID, nil); err != nil {
+		if err := m.cfg.callRemove(ctx, "/ip/firewall/nat", r.ID); err != nil {
 			return fmt.Errorf("delete masquerade %s: %w", r.ID, err)
 		}
 	}
@@ -311,19 +339,15 @@ func (m *MasqueradeReconciler) Remove(ctx context.Context) error {
 }
 
 func (m *MasqueradeReconciler) list(ctx context.Context) ([]natRule, error) {
-	data, err := m.cfg.apiReq(ctx, http.MethodGet, "/rest/ip/firewall/nat", nil)
+	rows, err := m.cfg.callPrint(ctx, "/ip/firewall/nat")
 	if err != nil {
 		return nil, err
 	}
-	var all []natRule
-	if err := json.Unmarshal(data, &all); err != nil {
-		return nil, fmt.Errorf("decode nat list: %w", err)
-	}
 	want := m.cfg.masqComment()
 	var ours []natRule
-	for _, r := range all {
-		if r.Comment == want {
-			ours = append(ours, r)
+	for _, r := range rows {
+		if r["comment"] == want {
+			ours = append(ours, natRuleFromMap(r))
 		}
 	}
 	return ours, nil
@@ -352,4 +376,11 @@ func (m *MasqueradeReconciler) logTransition(action string, attrs ...any) {
 	}
 	m.lastLog = action
 	m.log.Info("masquerade "+action, attrs...)
+}
+
+// NewNatReconciler6 — тот же реконсилер, но для /ipv6/firewall/nat. Маркер
+// правила тот же (awgproxy-divert:<iface>): таблицы v4 и v6 раздельные, так что
+// правила не пересекаются.
+func NewNatReconciler6(cfg Config, log *slog.Logger) *NatReconciler {
+	return &NatReconciler{cfg: cfg, log: log.With("family", "ipv6"), path: "/ipv6/firewall/nat"}
 }

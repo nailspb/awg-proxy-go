@@ -11,6 +11,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net"
+	"net/netip"
 	"os"
 	"strconv"
 	"time"
@@ -38,7 +39,7 @@ const (
 	defTTL       = 180
 	defPoll      = 30
 	defLog       = "info"
-	defAPIPort   = 443
+	defAPIPort   = 8728 // bin-API plain; для api-ssl нужно api_tls=true и обычно порт 8729
 )
 
 // Config — рабочая конфигурация сервиса (внутреннее представление).
@@ -69,6 +70,11 @@ type Config struct {
 	PollInterval time.Duration
 
 	Router RouterConn
+
+	// IPv6-адрес контейнера на veth (опционально). Если задан — divert ставит
+	// правило и в /ipv6/firewall/nat: server — для входящего UDP по IPv6, client —
+	// для апстрима (endpoint помеченного peer'а) с IPv6-адресом.
+	ContainerAddr6 string
 }
 
 // RouterConn — рабочие параметры подключения к роутеру (REST API).
@@ -120,6 +126,7 @@ type ServerSettings struct {
 	PollIntervalSec int            `json:"poll_interval_sec,omitzero"`
 	Obfuscation     Obfuscation    `json:"obfuscation"`
 	Router          RouterSettings `json:"router"`
+	ContainerAddr6  string         `json:"container_addr6,omitzero"` // IPv6 контейнера для dst-nat в /ipv6/firewall/nat (опционально)
 }
 
 // ClientSettings — профиль client-режима (1:1).
@@ -132,7 +139,8 @@ type ClientSettings struct {
 	PollIntervalSec int            `json:"poll_interval_sec,omitzero"`
 	Obfuscation     Obfuscation    `json:"obfuscation"`
 	Router          RouterSettings `json:"router"`
-	Divert          bool           `json:"divert"` // авто-управлять NAT-правилом
+	Divert          bool           `json:"divert"`                   // авто-управлять NAT-правилом
+	ContainerAddr6  string         `json:"container_addr6,omitzero"` // IPv6 контейнера — нужен, если endpoint апстрима IPv6
 }
 
 // Settings — формат JSON-файла (читается/пишется веб-интерфейсом).
@@ -222,6 +230,7 @@ func fillServer(c *Config, sv ServerSettings) {
 	c.SessionTTL = time.Duration(sv.SessionTTLSec) * time.Second
 	c.PollInterval = time.Duration(sv.PollIntervalSec) * time.Second
 	c.Router = routerConn(sv.Router)
+	c.ContainerAddr6 = sv.ContainerAddr6
 }
 
 func fillClient(c *Config, cl ClientSettings) {
@@ -235,6 +244,7 @@ func fillClient(c *Config, cl ClientSettings) {
 	c.SessionTTL = time.Duration(cl.SessionTTLSec) * time.Second
 	c.PollInterval = time.Duration(cl.PollIntervalSec) * time.Second
 	c.Router = routerConn(cl.Router)
+	c.ContainerAddr6 = cl.ContainerAddr6
 }
 
 func routerConn(r RouterSettings) RouterConn {
@@ -286,6 +296,11 @@ func (c *Config) validateService() error {
 	}
 	if c.Jmin > c.Jmax {
 		return fmt.Errorf("jmin(%d) > jmax(%d)", c.Jmin, c.Jmax)
+	}
+	if c.ContainerAddr6 != "" {
+		if a, err := netip.ParseAddr(c.ContainerAddr6); err != nil || !a.Is6() || a.Is4In6() {
+			return fmt.Errorf("container_addr6 must be an IPv6 address: %q", c.ContainerAddr6)
+		}
 	}
 	return nil
 }
